@@ -280,8 +280,9 @@ class GRISMCONFReader:
     def _read_orders(self):
         orders = []
         for line in self._lines:
-            if line.startswith("BEAM_"):
-                orders.append(line.split()[0][len("BEAM_"):])
+            parts = line.split("#")[0].split()
+            if parts and parts[0].startswith("BEAM_"):
+                orders.append(parts[0][len("BEAM_"):])
         return orders
 
     def _read_poly(self, name, order):
@@ -356,7 +357,7 @@ class CRDSReader:
         self.file = file
         self.full_path = self._resolve_path(file)
 
-        with asdf.open(self.full_path, copy_arrays=True) as af:
+        with asdf.open(self.full_path) as af:
             tree = af.tree
             self._meta = copy.deepcopy(dict(tree.get("meta", {})))
             self._dm_orders = list(tree["orders"])
