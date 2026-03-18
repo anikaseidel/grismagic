@@ -11,9 +11,11 @@ Explictly not ported from grizli/grismconf.py:
 
 """
 
+import warnings
+
 import numpy as np
 from .readers import aXeConfReader, GRISMCONFReader, CRDSReader, RomanConfReader
-from .wavelengthrange import get_wavelength_range
+from .wavelengthrange import load_all_ranges
 
 
 class GrismTrace:
@@ -49,15 +51,15 @@ class GrismTrace:
     Examples
     --------
     >>> tr = GrismTrace.from_axe("WFC3.G141.conf")
-    >>> dx = np.arange(-100, 200)
-    >>> x_tr, y_tr, lam = tr.get_trace(507, 507, order="A", dx=dx)
+    >>> offset = np.arange(-100, 200)
+    >>> x_tr, y_tr, lam = tr.get_trace(507, 507, order="A", offset=offset)
 
     >>> tr = GrismTrace.from_grismconf("NIRCAM_F444W_modA_R.conf")
-    >>> x_tr, y_tr, lam = tr.get_trace(1024, 1024, order="+1", dx=dx)
+    >>> x_tr, y_tr, lam = tr.get_trace(1024, 1024, order="+1", offset=offset)
 
     >>> tr = GrismTrace.from_crds("specwcs.asdf", filter_name="F200W")
-    >>> x_tr, y_tr, lam = tr.get_trace(1024, 1024, order="+1", dx=dx)
-    # lam_min / lam_max applied automatically from the CRDS wavelengthrange ref
+    >>> x_tr, y_tr, lam = tr.get_trace(1024, 1024, order="+1")
+    # offset and lam_min / lam_max applied automatically from filter_name
 
     GrismTrace.from_axe("file.conf")
     GrismTrace.from_grismconf("file.conf")
@@ -65,7 +67,7 @@ class GrismTrace:
     GrismTrace.from_roman("file.yaml")
     GrismTrace.from_file("file.*")          # auto-detects by extension/content
 
-    x_trace, y_trace, lam = tr.get_trace(x, y, order, dx)
+    x_trace, y_trace, lam = tr.get_trace(x, y, order, offset)
 
     """
 
@@ -86,6 +88,7 @@ class GrismTrace:
         self._wavelengthrange_file = wavelengthrange_file
         self._check_update = check_update
         self._instrument = instrument
+        self._waverange_table = None  # loaded once on first use: {(filter, order): (lmin, lmax)}
 
     # ------------------------------------------------------------------
     # Constructors
@@ -190,21 +193,38 @@ class GrismTrace:
         Return ``(lam_min, lam_max)``, filling in from the wavelengthrange
         reference when ``self.filter_name`` is set and neither limit was
         supplied explicitly.
+
+        The reference file is read once on first call and the full table is
+        cached on the instance; subsequent calls are pure dict lookups.
         """
         if (lam_min is None and lam_max is None) and self.filter_name is not None:
+            if self._waverange_table is None:
+                try:
+                    self._waverange_table = load_all_ranges(
+                        instrument=self._instrument,
+                        wavelengthrange_file=self._wavelengthrange_file,
+                        check_update=self._check_update,
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"Could not load wavelengthrange reference for "
+                        f"instrument={self._instrument!r}: {exc}. "
+                        "Traces will not be band-limited to the filter bandpass. "
+                        "Pass wavelengthrange_file= explicitly, set "
+                        "$GRISMAGIC_WAVELENGTHRANGE_FILE, or ensure $CRDS_PATH is set.",
+                        stacklevel=4,
+                    )
+                    self._waverange_table = {}
             try:
-                lam_min, lam_max = get_wavelength_range(
-                    self.filter_name,
-                    order=order,
-                    instrument=self._instrument,
-                    wavelengthrange_file=self._wavelengthrange_file,
-                    check_update=self._check_update,
-                )
-            except Exception:
-                pass  # fall back to no range restriction
+                order_str = str(int(str(order).lstrip("+")))
+            except ValueError:
+                order_str = str(order)
+            return self._waverange_table.get(
+                (self.filter_name.upper(), order_str), (None, None)
+            )
         return lam_min, lam_max
 
-    def dx_range(self, order, x=None, y=None, nt=512, lam_min=None, lam_max=None):
+    def offset_range(self, order, x=None, y=None, nt=512, lam_min=None, lam_max=None):
         """
         Pixel extent of the trace along its primary dispersion axis.
 
@@ -233,8 +253,8 @@ class GrismTrace:
         Returns
         -------
         lo, hi : float
-            Minimum and maximum offset from the source along the primary
-            dispersion axis (dx for row grisms, dy for column grisms).
+            Minimum and maximum pixel offset from the source along the primary
+            dispersion axis.
         """
         lam_min, lam_max = self._lam_range(order, lam_min, lam_max)
         if self._kind == "axe":
@@ -270,7 +290,7 @@ class GrismTrace:
             Target wavelengths.  Units: Angstrom for aXe and GRISMCONF;
             micron for CRDS and Roman.
         n_interp : int
-            Grid size for the numerical dx → wavelength inversion used by the
+            Grid size for the numerical offset → wavelength inversion used by the
             aXe format.
 
         Returns
@@ -296,7 +316,7 @@ class GrismTrace:
             y + (r.ymap(order, x, y) + dy_mm) * r.plate_scale,
         )
 
-    def get_traces(self, xs, ys, order, dx, n_lam_roman=512):
+    def get_traces(self, xs, ys, order, offset=None, n_lam_roman=512):
         """
         Compute traces for multiple source positions.
 
@@ -309,18 +329,19 @@ class GrismTrace:
             Source positions, one per source.
         order : str
             Spectral order identifier.
-        dx : array-like
-            Pixel offsets from each source along x (same grid for all sources).
+        offset : array-like, optional
+            Pixel offsets along the primary dispersion axis (same grid for all
+            sources).  If ``None``, derived automatically from ``offset_range``.
         n_lam_roman : int
             Wavelength grid size for Roman inversion.
 
         Returns
         -------
-        x_traces : np.ndarray, shape (n_sources, n_dx)
-        y_traces : np.ndarray, shape (n_sources, n_dx)
-        lams : np.ndarray, shape (n_sources, n_dx)
+        x_traces : np.ndarray, shape (n_sources, n_offset)
+        y_traces : np.ndarray, shape (n_sources, n_offset)
+        lams : np.ndarray, shape (n_sources, n_offset)
         """
-        results = [self.get_trace(x, y, order, dx, n_lam_roman) for x, y in zip(xs, ys)]
+        results = [self.get_trace(x, y, order, offset, n_lam_roman) for x, y in zip(xs, ys)]
         return tuple(np.array([r[i] for r in results]) for i in range(3))
 
     def get_traces_at_wavelength(self, xs, ys, order, lam, n_interp=512):
@@ -349,7 +370,7 @@ class GrismTrace:
         results = [self.get_trace_at_wavelength(x, y, order, lam, n_interp) for x, y in zip(xs, ys)]
         return tuple(np.array([r[i] for r in results]) for i in range(2))
 
-    def get_trace(self, x, y, order, dx, lam_min=None, lam_max=None, n_lam_roman=512):
+    def get_trace(self, x, y, order, offset=None, lam_min=None, lam_max=None, n_lam_roman=512):
         """
         Compute the grism trace for a source at detector position ``(x, y)``.
 
@@ -360,9 +381,11 @@ class GrismTrace:
             CRDS; FPA coordinates in mm for Roman.
         order : str
             Spectral order identifier as listed in ``self.orders``.
-        dx : array-like
-            Pixel offsets from the source along the primary dispersion axis
-            (x for row grisms, y for column grisms).
+        offset : array-like, optional
+            Pixel offsets from the source along the primary dispersion axis.
+            If ``None``, the range is derived automatically from
+            ``offset_range`` using the resolved wavelength limits and integer
+            pixel steps are used.
         lam_min, lam_max : float, optional
             Wavelength limits (same units as DISPL) used to restrict the t
             inversion to the physical filter bandpass.  Strongly recommended
@@ -383,27 +406,39 @@ class GrismTrace:
             GRISMCONF; micron for CRDS and Roman.
         """
         lam_min, lam_max = self._lam_range(order, lam_min, lam_max)
-        dx = np.asarray(dx, dtype=float)
+        if offset is None:
+            lo, hi = self.offset_range(order, x, y, lam_min=lam_min, lam_max=lam_max)
+            if not np.isfinite(lo) or not np.isfinite(hi) or (hi - lo) > 8192:
+                raise ValueError(
+                    f"offset_range for order={order!r} returned an unreasonable range "
+                    f"({lo:.3g}, {hi:.3g}). This usually means the INVDISPL polynomial "
+                    "is being evaluated outside its fitted domain (check that lam_min/"
+                    "lam_max units match the reader's wavelength units, or pass "
+                    "offset= explicitly)."
+                )
+            offset = np.arange(int(np.floor(lo)), int(np.ceil(hi)) + 1, dtype=float)
+        else:
+            offset = np.asarray(offset, dtype=float)
         if self._kind == "axe":
-            return self._trace_axe(x, y, order, dx)
+            return self._trace_axe(x, y, order, offset)
         if self._kind in ("grismconf", "crds"):
-            return self._trace_grismconf(x, y, order, dx, lam_min, lam_max)
-        return self._trace_roman(x, y, order, dx, n_lam=n_lam_roman)
+            return self._trace_grismconf(x, y, order, offset, lam_min, lam_max)
+        return self._trace_roman(x, y, order, offset, n_lam=n_lam_roman)
 
     # ------------------------------------------------------------------
     # Per-format implementations
     # ------------------------------------------------------------------
 
-    def _trace_axe(self, x, y, beam, dx):
-        dy, lam = self.reader.get_beam_trace(x, y, dx, beam=beam)
-        return x + dx, y + dy, lam
+    def _trace_axe(self, x, y, beam, offset):
+        dy, lam = self.reader.get_beam_trace(x, y, offset, beam=beam)
+        return x + offset, y + dy, lam
 
     def _t_grid(self, order, x, y, nt, lam_min, lam_max):
         """Return a t grid restricted to [lam_min, lam_max] via INVDISPL, or [0, 1] if unset."""
         if lam_min is not None and lam_max is not None:
             r = self.reader
-            t0 = float(r.INVDISPL(order, x, y, lam_min))
-            t1 = float(r.INVDISPL(order, x, y, lam_max))
+            t0 = float(np.clip(r.INVDISPL(order, x, y, lam_min), 0.0, 1.0))
+            t1 = float(np.clip(r.INVDISPL(order, x, y, lam_max), 0.0, 1.0))
             return np.linspace(min(t0, t1), max(t0, t1), nt)
         return np.linspace(0, 1, nt)
 
@@ -415,21 +450,51 @@ class GrismTrace:
             return 'y'
         return 'x'
 
-    def _trace_grismconf(self, x, y, order, dx, lam_min=None, lam_max=None, nt=512):
+    def _trace_grismconf(self, x, y, order, offset, lam_min=None, lam_max=None, nt=512):
         r = self.reader
-        # Always invert over the full physical t range so that any dx input
-        # is properly handled; wavelength limits mask the output, not the inversion.
-        t0 = np.linspace(0, 1, nt)
+        # Build the forward trace on a fine t grid, then directly interpolate
+        # the secondary axis and wavelength from the primary axis.  This avoids
+        # amplifying interpolation noise through a possibly non-monotone secondary
+        # polynomial (e.g. the order-0 DISPY quadratic in GR150C).
+        #
+        # Note: INVDISPX and INVDISPY are intentionally NOT used here.  Neither
+        # CRDS ASDF specwcs files nor GRISMCONF files store analytic inverses
+        # for DISPX/DISPY (only INVDISPL is provided in either format), so any
+        # inversion of DISPX/DISPY would be numerical anyway.  Additionally,
+        # the forward polynomials can be non-monotone in t (e.g. the order-0
+        # DISPY quadratic in GR150C), making numerical inversion via interp
+        # unstable.  The tabular approach below (matching what the JWST pipeline
+        # does via Tabular1D) is stable for all orders.
+        #
+        # If the input polynomials were guaranteed to be monotone in t (which
+        # they are for most orders but not order 0), one could instead invert
+        # analytically:
+        #   t = r.INVDISPX(order, x, y, offset)   # x-primary
+        #   y_trace = y + r.DISPY(order, x, y, t)
+        #   lam     = r.DISPL(order, x, y, t)
+        # or equivalently for y-primary using INVDISPY.  This would be faster
+        # but relies on well-conditioned, monotone forward polynomials.
+        # Restrict the t grid to the wavelength range of the filter.  Outside
+        # that range the polynomials can be non-monotone, which causes argsort +
+        # interp to produce erratic secondary-axis values for offsets that happen
+        # to land in those non-physical regions.  _t_grid falls back to [0, 1]
+        # when lam_min / lam_max are both None.
+        t0 = self._t_grid(order, x, y, nt, lam_min, lam_max)
+        dispx0 = r.DISPX(order, x, y, t0)
+        dispy0 = r.DISPY(order, x, y, t0)
+        displ0 = r.DISPL(order, x, y, t0)
+
         if self._primary_axis(order, x, y, lam_min, lam_max) == 'y':
-            # Column grism: the input 'dx' is really a dy offset
-            t = r.INVDISPY(order, x, y, dx, t0=t0)
-            x_trace = x + r.DISPX(order, x, y, t)
-            y_trace = y + dx
+            so = np.argsort(dispy0)
+            x_trace = x + np.interp(offset, dispy0[so], dispx0[so])
+            y_trace = y + offset
+            lam = np.interp(offset, dispy0[so], displ0[so])
         else:
-            t = r.INVDISPX(order, x, y, dx, t0=t0)
-            x_trace = x + dx
-            y_trace = y + r.DISPY(order, x, y, t)
-        lam = r.DISPL(order, x, y, t)
+            so = np.argsort(dispx0)
+            x_trace = x + offset
+            y_trace = y + np.interp(offset, dispx0[so], dispy0[so])
+            lam = np.interp(offset, dispx0[so], displ0[so])
+
         if lam_min is not None or lam_max is not None:
             outside = np.zeros(len(lam), dtype=bool)
             if lam_min is not None:
@@ -442,19 +507,19 @@ class GrismTrace:
         return x_trace, y_trace, lam
 
     def _axe_at_wavelength(self, x, y, beam, lam, n_interp):
-        lo, hi = self.dx_range(beam)
-        dx_grid = np.linspace(lo, hi, n_interp)
-        _, _, lam_grid = self._trace_axe(x, y, beam, dx_grid)
+        lo, hi = self.offset_range(beam)
+        offset_grid = np.linspace(lo, hi, n_interp)
+        _, _, lam_grid = self._trace_axe(x, y, beam, offset_grid)
         so = np.argsort(lam_grid)
-        dx = np.interp(lam, lam_grid[so], dx_grid[so])
-        x_trace, y_trace, _ = self._trace_axe(x, y, beam, dx)
+        offset = np.interp(lam, lam_grid[so], offset_grid[so])
+        x_trace, y_trace, _ = self._trace_axe(x, y, beam, offset)
         return x_trace, y_trace
 
-    def _trace_roman(self, x, y, order, dx, n_lam=512):
+    def _trace_roman(self, x, y, order, offset, n_lam=512):
         r = self.reader
         wl_grid = np.linspace(r.wl_min, r.wl_max, n_lam)
         dx_grid, dy_grid = r.get_trace(order, x, y, wl_grid)
         so = np.argsort(dx_grid)
-        y_trace = y + np.interp(dx, dx_grid[so], dy_grid[so])
-        lam = np.interp(dx, dx_grid[so], wl_grid[so])
-        return x + dx, y_trace, lam
+        y_trace = y + np.interp(offset, dx_grid[so], dy_grid[so])
+        lam = np.interp(offset, dx_grid[so], wl_grid[so])
+        return x + offset, y_trace, lam

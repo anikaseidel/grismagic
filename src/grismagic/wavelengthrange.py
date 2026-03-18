@@ -40,27 +40,58 @@ _CRDS_DOWNLOAD_URL = (
 # ---------------------------------------------------------------------------
 
 
-def get_wavelength_range(filter_name, order=None, instrument="niriss",
-                         wavelengthrange_file=None, check_update=False):
+def load_all_ranges(instrument="niriss", wavelengthrange_file=None,
+                    check_update=False):
     """
-    Return ``(lam_min, lam_max)`` in microns for *filter_name*.
+    Load the entire wavelengthrange reference into a dict and return it.
+
+    The dict is keyed by ``(filter_name_upper, order_str)`` where
+    *order_str* is the integer order as a plain string (e.g. ``'-1'``,
+    ``'0'``, ``'1'``).  Values are ``(lam_min, lam_max)`` in microns.
+
+    This is the preferred entry point when computing traces for many
+    sources: call it once, then look up ranges with plain dict access
+    instead of re-reading the file on every call.
 
     Parameters
     ----------
-    filter_name : str
-        Filter name, e.g. ``'F200W'``.
-    order : int or str, optional
-        Spectral order.  ``None`` (default) returns the range for the first
-        entry that matches *filter_name* (all orders share the same range in
-        the CRDS reference).
     instrument : str
         JWST instrument, lower-case, e.g. ``'niriss'``.
     wavelengthrange_file : str or path-like, optional
         Explicit path to a wavelengthrange ASDF file.  Skips the cache.
     check_update : bool
         If ``True``, query CRDS for the current operational context and
-        re-download the reference file if the context has changed since the
-        last download.
+        re-download the reference file if the context has changed.
+
+    Returns
+    -------
+    dict
+        ``{(filter_str, order_str): (lam_min, lam_max)}``
+    """
+    path = _resolve(instrument, wavelengthrange_file, check_update)
+    return _read_all_ranges(path)
+
+
+def get_wavelength_range(filter_name, order=None, instrument="niriss",
+                         wavelengthrange_file=None, check_update=False):
+    """
+    Return ``(lam_min, lam_max)`` in microns for *filter_name* and *order*.
+
+    Parameters
+    ----------
+    filter_name : str
+        Filter name, e.g. ``'F200W'``.
+    order : int or str, optional
+        Spectral order.  ``None`` returns the range for the first entry
+        matching *filter_name* (all orders share the same range in the
+        current CRDS reference).
+    instrument : str
+        JWST instrument, lower-case, e.g. ``'niriss'``.
+    wavelengthrange_file : str or path-like, optional
+        Explicit path to a wavelengthrange ASDF file.  Skips the cache.
+    check_update : bool
+        If ``True``, query CRDS for the current operational context and
+        re-download the reference file if the context has changed.
 
     Returns
     -------
@@ -92,8 +123,23 @@ def _resolve(instrument, wavelengthrange_file, check_update):
     env = os.environ.get("GRISMAGIC_WAVELENGTHRANGE_FILE")
     if env:
         return env
-    # 3. Cache (download if needed)
-    return _ensure_cached(instrument, check_update)
+    # 3. grismagic's own cache (download if needed)
+    try:
+        return _ensure_cached(instrument, check_update)
+    except Exception:
+        pass
+    # 4. Fall back to any wavelengthrange file already present in $CRDS_PATH
+    crds_file = _find_in_crds_path(instrument)
+    if crds_file:
+        return crds_file
+    raise RuntimeError(
+        f"Cannot resolve a wavelengthrange reference for instrument={instrument!r}. "
+        "Options:\n"
+        "  • Pass wavelengthrange_file= explicitly\n"
+        "  • Set $GRISMAGIC_WAVELENGTHRANGE_FILE\n"
+        "  • Set $CRDS_PATH to a directory containing the JWST reference files\n"
+        "  • Call grismagic.wavelengthrange._download_and_cache() once with network access"
+    )
 
 
 def _ensure_cached(instrument, check_update):
@@ -127,6 +173,29 @@ def _fetch_crds_context():
             return r.read().decode().strip().strip('"')
     except Exception:
         return None
+
+
+def _find_in_crds_path(instrument):
+    """
+    Look for an existing wavelengthrange ASDF file in ``$CRDS_PATH``.
+
+    Checks the standard CRDS directory layout
+    ``$CRDS_PATH/references/jwst/<instrument>/``.  Returns the path of the
+    highest-versioned file found, or ``None`` if nothing is found.
+    """
+    import glob
+
+    crds_root = os.environ.get("CRDS_PATH")
+    if not crds_root:
+        return None
+    pattern = os.path.join(
+        crds_root, "references", "jwst", instrument.lower(),
+        f"*{instrument.lower()}*wavelengthrange*.asdf",
+    )
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    return sorted(matches)[-1]  # highest version by filename sort
 
 
 def _find_best_filename(instrument, context):
@@ -197,27 +266,37 @@ def _save_meta(meta):
 # ---------------------------------------------------------------------------
 
 
-def _read_range(path, filter_name, order):
-    """Parse (lam_min, lam_max) from a wavelengthrange ASDF file."""
+def _read_all_ranges(path):
+    """Return a dict of all (filter, order) -> (lam_min, lam_max) from *path*."""
     import asdf
 
-    filter_name = filter_name.upper()
-    # Normalise order for comparison: strip '+', convert to int string
-    order_str = None
-    if order is not None:
-        try:
-            order_str = str(int(str(order).lstrip("+")))
-        except ValueError:
-            order_str = str(order)
-
+    result = {}
     with asdf.open(path) as af:
         for entry in af.tree["wavelengthrange"]:
             # entry: [order_int, filter_str, lam_min, lam_max]
             entry_order, entry_filter, lmin, lmax = entry
-            if entry_filter.upper() != filter_name:
-                continue
-            if order_str is None or str(int(entry_order)) == order_str:
-                return float(lmin), float(lmax)
+            key = (entry_filter.upper(), str(int(entry_order)))
+            result[key] = (float(lmin), float(lmax))
+    return result
+
+
+def _read_range(path, filter_name, order):
+    """Parse (lam_min, lam_max) from a wavelengthrange ASDF file."""
+    table = _read_all_ranges(path)
+    filter_name = filter_name.upper()
+    if order is None:
+        # Return the first entry for this filter (order-independent in practice)
+        for (f, _), v in table.items():
+            if f == filter_name:
+                return v
+    else:
+        try:
+            order_str = str(int(str(order).lstrip("+")))
+        except ValueError:
+            order_str = str(order)
+        key = (filter_name, order_str)
+        if key in table:
+            return table[key]
 
     raise ValueError(
         f"No wavelength range found for filter={filter_name!r}, order={order!r} "
