@@ -88,13 +88,13 @@ REF_X, REF_Y = 1024.0, 1024.0
 
 def test_dx_range(grism_trace):
     order = grism_trace.orders[0]
-    lo, hi = grism_trace.dx_range(order, x=REF_X, y=REF_Y)
+    lo, hi = grism_trace.offset_range(order, x=REF_X, y=REF_Y)
     assert hi > lo
 
 
 def test_get_trace_shape(grism_trace):
     order = grism_trace.orders[0]
-    lo, hi = grism_trace.dx_range(order, x=REF_X, y=REF_Y)
+    lo, hi = grism_trace.offset_range(order, x=REF_X, y=REF_Y)
     dx = np.linspace(lo, hi, 50)
     x_tr, y_tr, lam = grism_trace.get_trace(REF_X, REF_Y, order, dx)
 
@@ -106,7 +106,7 @@ def test_get_trace_shape(grism_trace):
 def test_get_trace_wavelength_monotonic(grism_trace):
     """Wavelength should be monotonically increasing (or decreasing) along the trace."""
     order = grism_trace.orders[0]
-    lo, hi = grism_trace.dx_range(order, x=REF_X, y=REF_Y)
+    lo, hi = grism_trace.offset_range(order, x=REF_X, y=REF_Y)
     dx = np.linspace(lo, hi, 200)
     _, _, lam = grism_trace.get_trace(REF_X, REF_Y, order, dx)
     dlam = np.diff(lam)
@@ -115,7 +115,7 @@ def test_get_trace_wavelength_monotonic(grism_trace):
 
 def test_get_trace_at_wavelength(grism_trace):
     order = grism_trace.orders[0]
-    lo, hi = grism_trace.dx_range(order, x=REF_X, y=REF_Y)
+    lo, hi = grism_trace.offset_range(order, x=REF_X, y=REF_Y)
     dx = np.linspace(lo, hi, 200)
     _, _, lam_full = grism_trace.get_trace(REF_X, REF_Y, order, dx)
 
