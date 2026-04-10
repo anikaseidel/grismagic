@@ -1,5 +1,7 @@
 import numpy as np 
 from grismagic.traces import GrismTrace
+from astropy.io import fits
+from scipy.interpolate import interp1d
 
 from scipy.sparse import save_npz, lil_matrix, vstack
 
@@ -302,3 +304,95 @@ class build_matrix:
         save_npz("H_matrix_flux_all_orders.npz", H)
         return
     
+
+    ##################################################
+    # Sensitivities, ones and zeros trace matrix with trace count, all orders
+    ###################################################
+    
+    def build_trace_matrix_sensitivities_all_orders(self):
+        """Builds the matrix A with size(x_pixel*y_pixel)*(x_pixel*y_pixel+1) where each row is a pixel in the dispersed image and each column 
+        the trace at the object in direct coordinates. Last row includes how many trace pixels per column. Called by def build_and_save_matrix"""
+
+
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.1.etc.1.5.2.sens.fits") #F200W, GR150R
+        data1= hdu[1].data
+        wavelength1 = data1["WAVELENGTH"]
+        sensitivity1 = data1["SENSITIVITY"]
+        mean1 = np.mean(sensitivity1)
+        sensitivity1=sensitivity1/mean1 #normalized
+
+        hdu.close()
+
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.0.etc.1.5.2.sens.fits") #F200W, GR150R
+        data0= hdu[1].data
+        wavelength0 = data0["WAVELENGTH"]
+        sensitivity0 = data0["SENSITIVITY"] 
+        sensitivity0 = sensitivity0/mean1 #normalized by the same factor as 1st order
+
+        hdu.close()
+
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.2.etc.1.5.2.sens.fits") #F200W, GR150R
+        data2= hdu[1].data
+        wavelength2 = data2["WAVELENGTH"]
+        sensitivity2 = data2["SENSITIVITY"] 
+        sensitivity2 = sensitivity2/mean1 #normalized by the same factor as 1st order
+
+        hdu.close()
+        sens_interp = [interp1d(wavelength1, sensitivity1, bounds_error=False, fill_value=0.0),interp1d(wavelength0, sensitivity0, bounds_error=False, fill_value=0.0),interp1d(wavelength2, sensitivity2, bounds_error=False, fill_value=0.0)]
+
+
+        order102 = ["A","B","C"]
+                    #assembles matrix A
+        N = self.x_pixel * self.y_pixel
+        A=lil_matrix((N,N)) #good for sparse matrices
+        for order in order102:
+            if order == "A":
+                senscount = 1
+            elif order == "B":
+                senscount = 0
+            elif order == "C":
+                senscount = 2
+            for i in range (self.x_pixel): #iterating over all pixels
+                    for j in range (self.y_pixel): 
+                                    # grismagic expects source positions in detector coords
+                        x0 = self.xmin + i
+                        y0 = self.ymin + j
+                        # Compute the trace offsets along the grism
+                        # offset=None lets grismagic choose the full trace range
+                        x_trace, y_trace, lam_trace = self.tr.get_trace(x0, y0, order=order)
+                    
+                        x_new = np.round(x_trace).astype(int) #trace in observation coordinates
+                        y_new = np.round(y_trace).astype(int) 
+                    
+                        #only visible trace
+                        mask = (x_new >= self.xmin) & (x_new < self.xmax) & (y_new >= self.ymin) & (y_new < self.ymax) 
+                        
+                        if not np.any(mask):
+                            continue
+
+                        x_valid = x_new[mask]
+                        y_valid = y_new[mask]
+                        lam_valid = lam_trace[mask]
+                        
+                        rows = (x_valid - self.xmin)*self.y_pixel +(y_valid-self.ymin)
+                        k= i*self.y_pixel +j
+                        
+                        values = sens_interp[senscount](lam_valid).reshape(-1, 1)
+                        for r, v in zip(rows, values):
+                            A[r, k] += v 
+                
+            # compute row sum to mark how many trace pixels per column
+        row_sum = A.sum(axis = 0)
+            
+            # Append it as last row to A
+        A = vstack([A, row_sum])
+        return A
+    
+    def build_and_save_trace_matrix_sensitivities_all_orders(self):
+        """Calls build and saves the template matrix containing all traces. 
+        Furthermore A stores in its last row the amount of ones per column to determine how many
+        colored pixels each trace has. JUST DO THIS ONCE PER CONFIGURATION"""
+        A = self.build_trace_matrix_sensitivities_all_orders()
+        A = A.tocsr()
+        save_npz("A_matrix_with_trace_count_sensitivities_all_orders.npz", A)
+        return

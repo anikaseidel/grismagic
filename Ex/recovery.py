@@ -21,6 +21,15 @@ class recovery:
            
         else:
             self.H_full = None
+            
+        if os.path.exists("A_matrix_with_trace_count_sensitivities_all_orders.npz"): #checks if file exists
+            self.ASens_full = load_npz("A_matrix_with_trace_count_sensitivities_all_orders.npz") #loads stored traces matrix
+            self.trace_countSens = self.ASens_full[-1].toarray().ravel() #gives the amount of trace pixels per column of A. A1 gives 1D vector
+            self.ASens=self.ASens_full[:-1] #keeps all rows except the last one, so A is the trace build matrix again
+        else:
+            self.ASens_full = None
+            self.ASens = None
+            self.trace_countSens = None
         
         
     def recover_direct_from_traces_matrix(self, dispersed):
@@ -62,6 +71,21 @@ class recovery:
         A = build_matrix()
         Recovered = A.integrated_flux_image(d)
      
+        return Recovered
+    
+    def recover_direct_from_traces_sensitivities_matrix(self, dispersed):
+        """Function to recover direct image from SELF-COMPUTED dispersed. Uses the precomputed traces matrix A to recover the direct image from a dispersed image 
+        via least squares."""
+        m,n = dispersed.shape
+        f=dispersed.ravel() #flattens dispersion matrix to vector for matrix multiplication
+        result = lsqr(self.ASens,f) #solves min_d ||Ad-f||^2
+        d_recovered = result[0]
+        
+        #d=d_recovered*self.trace_count #recovers total intensity for uniform ditribution
+        
+        Recovered = d_recovered.reshape(m, n) #transforms lsqr solution to matrix
+        #Recovered[Recovered<0.05]=0 #small values are background error so ignore this
+        
         return Recovered
     
     

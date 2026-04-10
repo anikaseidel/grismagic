@@ -78,7 +78,7 @@ filterwarnings = [
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["win-64"]
+platforms = ["win-64","linux-64"]
 
 [tool.pixi.pypi-dependencies]
 grismagic = { path = ".", editable = true }
@@ -99,3 +99,4 @@ matplotlib = ">=3.10.8,<4"
 pytest = ">=9.0.2,<10"
 astropy = ">=7.2.0,<8"
 asdf-astropy = ">=0.11.0,<0.12"
+asdf = ">=5.2.0,<6"
