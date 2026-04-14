@@ -2,7 +2,7 @@ import numpy as np
 from grismagic.traces import GrismTrace
 from astropy.io import fits
 from scipy.interpolate import interp1d
-
+import pandas as pd
 from scipy.sparse import save_npz, lil_matrix, vstack
 
 class build_matrix: 
@@ -14,7 +14,9 @@ class build_matrix:
 
         self.lo, self.hi = self.tr._lam_range("1", None, None) #minimum and maximum wavelength in microns for first
         self.lo = int(self.lo * 10000) #as int
+        self.lo = max(self.lo, 7000) #for PCA, goes from 0.7 to 2.2
         self.hi= int(self.hi * 10000)   # as int
+        self.hi = min(self.hi, 22000) #for PCA, goes from 0.7 to 2.2
         self.lambdas = np.linspace(self.lo, self.hi, 150) #wavelength list
         self.base = np.linspace(self.lo, self.hi, 5) #wavelength list
         self.mu = np.linspace(self.lambdas.min(), self.lambdas.max(), len(self.base))
@@ -26,6 +28,8 @@ class build_matrix:
         self.ymin, self.ymax = 0, 500
         self.x_pixel = np.abs(self.xmin) + np.abs(self.xmax) #we need the size of the image in coding coordinates
         self.y_pixel = np.abs(self.ymin) + np.abs(self.ymax) 
+        
+        self.df = pd.read_csv("eigenspectra_kurucz.csv", sep=",") #extracts eigenspectra from pca file 
         
 
 
@@ -69,6 +73,20 @@ class build_matrix:
             Phi[:, m] = self.gaussian_basis_function_phi_m(self.lambdas, m)
 
         return Phi
+#######################################################
+# PCA eigenspectra basis
+#######################################################
+    def eigenspectra_basis(self):
+        """Basis by using eigenspectra from PCA. Wavelengths are in um!!!"""
+        wavelength = self.df.iloc[:, 0].to_numpy() #the wavelengths from pca (lambdas, 1)
+        eigenspectra = self.df.iloc[:, 1:].to_numpy() #the 10 eigenspectra in (lambdas, 10)
+
+        wavelength_angstrom = wavelength* 1e4 # conversion from um to angstrom
+        interp_func = interp1d(wavelength_angstrom, eigenspectra, axis=0, kind='linear') #interpolation to use self.lambdas
+
+        eigenspectra_new = interp_func(self.lambdas)  # shape (self.lambdas, 10)
+        
+        return eigenspectra_new
 
 ##################################################
 # two functions to construct image from coefficients vector
@@ -396,3 +414,222 @@ class build_matrix:
         A = A.tocsr()
         save_npz("A_matrix_with_trace_count_sensitivities_all_orders.npz", A)
         return
+    #####################################
+    # Matrix with basis for one order with PCA basis
+    ####################################
+
+
+    def build_trace_matrix_coefficients_PCA(self):
+        """Builds the matrix H with size(x_pixel*y_pixel)*(x_pixel*y_pixel*h) where each row is a pixel in the dispersed image and each column 
+        the trace at a basis function at the object in direct coordinates. Uses the spectrum function phi_m(lambda), s.t. we store phi in H and only need a_m(x,y) in d. 
+        Called by def build_and_save_matrix
+            f = H @ a_tilde
+            where a_tilde consists out of a_0(k_1),a_1(k_1)....a_n(k_last)
+        """
+        #assembles matrix H
+        N = self.x_pixel * self.y_pixel # row dimension of H
+        p,q = self.df.shape
+        h=q-1 # amount of basis functions. -1 because 1st column are the wavelengths.
+   
+        H=lil_matrix((N,N*h)) #good for sparse matrices
+        Phi = self.eigenspectra_basis()
+        
+
+        for i in range(self.x_pixel):
+            for j in range(self.x_pixel):
+                k= i*self.y_pixel +j #gets column index right, for which pixel/column are we inserting the trace
+                
+                x0 = i + self.xmin
+                y0 = j + self.ymin
+
+                try:
+                    # CRUCIAL: align wavelengths with your basis
+                    x_trace, y_trace = self.tr.get_trace_at_wavelength(x0, y0, order="A", lam=self.lambdas)
+                except:
+                    continue
+                
+                x_trace = np.array(x_trace)
+                y_trace = np.array(y_trace)
+
+                # pixel mapping
+                x_pix = np.round(x_trace).astype(int)
+                y_pix = np.round(y_trace).astype(int)
+
+                mask = (
+                    (x_pix >= self.xmin) & (x_pix < self.xmax) &
+                    (y_pix >= self.ymin) & (y_pix < self.ymax)
+                )
+                if not np.any(mask):
+                    continue
+
+
+                x_valid = x_pix[mask] # only x values that are visible in x range
+                y_valid = y_pix[mask] # only y values that are visible in y range
+                lam_indices = np.where(mask)[0]
+                
+                rows = (x_valid - self.xmin)*self.y_pixel +(y_valid-self.ymin) # gets row index right for trace. In which rows appears the trace?
+        
+            
+                for idx, row in enumerate(rows): # enumerates gives back the index of the row and the row at the same time.
+                    l_indx = lam_indices[idx]
+                    for m in range(h):
+                        col = k*h+ m #correct column indexing
+                        H[row,col] += Phi[l_indx,m] # instead of a trace 00111110000 we add now the function phi(lambdas) to positions of the trace
+            
+        return H
+    
+    def build_and_save_trace_matrix_coefficients_PCA(self):
+        """Calls build and saves the template matrix containing all traces. 
+        Furthermore A stores in its last row the amount of ones per column to determine how many
+        colored pixels each trace has. JUST DO THIS ONCE PER CONFIGURATION"""
+        
+        H = self.build_trace_matrix_coefficients_PCA()
+        H = H.tocsr()
+        save_npz("H_matrix_flux_1st_order_PCA.npz", H)
+        return
+    
+    #####################################
+    # Matrix with basis for one order with PCA basis and sensitivity curves
+    ####################################
+
+
+    def build_trace_matrix_coefficients_PCA_sensitivity(self):
+        """Builds the matrix H with size(x_pixel*y_pixel)*(x_pixel*y_pixel*h) where each row is a pixel in the dispersed image and each column 
+        the trace at a basis function at the object in direct coordinates. Uses the spectrum function phi_m(lambda), s.t. we store phi in H and only need a_m(x,y) in d. 
+        Called by def build_and_save_matrix
+            f = H @ a_tilde
+            where a_tilde consists out of a_0(k_1),a_1(k_1)....a_n(k_last)
+        """
+        ########
+        # sensitivity curves
+        
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.1.etc.1.5.2.sens.fits") #F200W, GR150R
+        data1= hdu[1].data
+        wavelength1 = data1["WAVELENGTH"]
+        sensitivity1 = data1["SENSITIVITY"]
+        mean1 = np.mean(sensitivity1)
+        sensitivity1=sensitivity1/mean1 #normalized
+
+        hdu.close()
+
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.0.etc.1.5.2.sens.fits") #F200W, GR150R
+        data0= hdu[1].data
+        wavelength0 = data0["WAVELENGTH"]
+        sensitivity0 = data0["SENSITIVITY"] 
+        sensitivity0 = sensitivity0/mean1 #normalized by the same factor as 1st order
+
+        hdu.close()
+
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.2.etc.1.5.2.sens.fits") #F200W, GR150R
+        data2= hdu[1].data
+        wavelength2 = data2["WAVELENGTH"]
+        sensitivity2 = data2["SENSITIVITY"] 
+        sensitivity2 = sensitivity2/mean1 #normalized by the same factor as 1st order
+
+        hdu.close()
+        sens_interp = [interp1d(wavelength1, sensitivity1, bounds_error=False, fill_value=0.0),interp1d(wavelength0, sensitivity0, bounds_error=False, fill_value=0.0),interp1d(wavelength2, sensitivity2, bounds_error=False, fill_value=0.0)]
+
+
+        #assembles matrix H
+        N = self.x_pixel * self.y_pixel # row dimension of H
+        p,q = self.df.shape
+        h=q-1 # amount of basis functions. -1 because 1st column are the wavelengths.
+   
+        H=lil_matrix((N,N*h)) #good for sparse matrices
+        Phi = self.eigenspectra_basis()
+        
+        order102 = ["A","B","C"]
+        for order in order102:
+            if order == "A":
+                senscount = 1
+            elif order == "B":
+                senscount = 0
+            elif order == "C":
+                senscount = 2
+            for i in range(self.x_pixel):
+                for j in range(self.x_pixel):
+                    k= i*self.y_pixel +j #gets column index right, for which pixel/column are we inserting the trace
+                    
+                    x0 = i + self.xmin
+                    y0 = j + self.ymin
+
+                    try:
+                        # CRUCIAL: align wavelengths with your basis
+                        x_trace, y_trace = self.tr.get_trace_at_wavelength(x0, y0, order=order, lam= self.lambdas)
+                    except:
+                        continue
+                    
+                    x_trace = np.array(x_trace)
+                    y_trace = np.array(y_trace)
+                    
+
+                    # pixel mapping
+                    x_pix = np.round(x_trace).astype(int)
+                    y_pix = np.round(y_trace).astype(int)
+
+                    mask = (
+                        (x_pix >= self.xmin) & (x_pix < self.xmax) &
+                        (y_pix >= self.ymin) & (y_pix < self.ymax)
+                    )
+                    if not np.any(mask):
+                        continue
+
+
+                    x_valid = x_pix[mask] # only x values that are visible in x range
+                    y_valid = y_pix[mask] # only y values that are visible in y range
+                    lam_idx = np.where(mask)[0]
+                    
+                    rows = (x_valid - self.xmin)*self.y_pixel +(y_valid-self.ymin) # gets row index right for trace. In which rows appears the trace?
+
+                    lam_valid = self.lambdas[lam_idx]
+                    values = sens_interp[senscount](lam_valid).reshape(-1, 1)
+               
+                    for idx, row in enumerate(rows): # enumerates gives back the index of the row and the row at the same time.
+                        l_indx = lam_idx[idx]
+                        sens_idx = values[idx]
+                        
+                        for m in range(h):
+                            col = k*h+ m #correct column indexing
+                            H[row,col] += Phi[l_indx,m]*sens_idx # instead of a trace 00111110000 we add now the function phi(lambdas) to positions of the trace
+                
+        return H
+    
+    def build_and_save_trace_matrix_coefficients_PCA_sensitivity(self):
+        """Calls build and saves the template matrix containing all traces. 
+        Furthermore A stores in its last row the amount of ones per column to determine how many
+        colored pixels each trace has. JUST DO THIS ONCE PER CONFIGURATION"""
+        
+        H = self.build_trace_matrix_coefficients_PCA_sensitivity()
+        H = H.tocsr()
+        save_npz("H_matrix_flux_500_500_orders_PCA_sensitivity.npz", H)
+        return
+##################################################
+# PCA two functions to construct image from coefficients vector
+########################################################
+    def compute_phi_weights_PCA(self):
+        """Approximates I(x,y)=int a(x,y)phi(lambda) d lambda"""
+        Phi = self.eigenspectra_basis()  # shape (n_lambda, 10)
+        delta = self.lambdas[1]-self.lambdas[0]
+    
+        # integrate each basis function over lambda
+        w = np.sum(Phi, axis=0)*delta   # shape (n_lambda,)
+        return w
+    
+    def integrated_flux_image_PCA(self, a_tilde):
+        """creates direct image from coefficients with I(x,y)=int a(x,y)phi(lambda) d lambda"""
+        Phi = self.eigenspectra_basis()  # shape (n_lambda, 10)
+        n = Phi.shape[1] # =10
+        w = self.compute_phi_weights_PCA()
+    
+        image = np.zeros((self.x_pixel, self.y_pixel))
+    
+        for k in range(self.x_pixel * self.y_pixel):
+            i = k // self.y_pixel
+            j = k % self.y_pixel
+        
+            a_k = a_tilde[k*n:(k+1)*n]
+        
+            image[i,j] = np.dot(a_k, w)
+    
+        return image
+    
