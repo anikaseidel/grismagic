@@ -365,7 +365,7 @@ class build_matrix:
         sens_interp = [interp1d(wavelength1, sens1_norm, bounds_error=False, fill_value=0.0),interp1d(wavelength0, sens0_norm, bounds_error=False, fill_value=0.0),interp1d(wavelength2, sens2_norm, bounds_error=False, fill_value=0.0)]
         delta_lambda = self.lambdas[1]-self.lambdas[0]
 
-        order102 = ["A","B","D"]
+        order102 = ["A","B","C"]
                     #assembles matrix A
         N = self.x_pixel * self.y_pixel
         A=lil_matrix((N,N)) #good for sparse matrices
@@ -374,7 +374,7 @@ class build_matrix:
                 senscount = 1
             elif order == "B":
                 senscount = 0
-            elif order == "D":
+            elif order == "C":
                 senscount = 2
             print(order)
             for i in range (self.x_pixel): #iterating over all pixels
@@ -514,8 +514,8 @@ class build_matrix:
         data1= hdu[1].data
         wavelength1 = data1["WAVELENGTH"]
         sensitivity1 = data1["SENSITIVITY"]
-        mean1 = np.max(sensitivity1)
-        sensitivity1=sensitivity1/mean1 #normalized
+        max1 = np.sum(sensitivity1)
+        sensitivity1=sensitivity1/max1 #normalized
 
         hdu.close()
 
@@ -523,7 +523,8 @@ class build_matrix:
         data0= hdu[1].data
         wavelength0 = data0["WAVELENGTH"]
         sensitivity0 = data0["SENSITIVITY"] 
-        sensitivity0 = sensitivity0/mean1 #normalized by the same factor as 1st order
+        max0= np.sum(sensitivity0)
+        sensitivity0 = sensitivity0/max0 #normalized by the same factor as 1st order
 
         hdu.close()
 
@@ -531,7 +532,8 @@ class build_matrix:
         data2= hdu[1].data
         wavelength2 = data2["WAVELENGTH"]
         sensitivity2 = data2["SENSITIVITY"] 
-        sensitivity2 = sensitivity2/mean1 #normalized by the same factor as 1st order
+        max2 = np.sum(sensitivity2)
+        sensitivity2 = sensitivity2/max2 #normalized by the same factor as 1st order
 
         hdu.close()
         sens_interp = [interp1d(wavelength1, sensitivity1, bounds_error=False, fill_value=0.0),interp1d(wavelength0, sensitivity0, bounds_error=False, fill_value=0.0),interp1d(wavelength2, sensitivity2, bounds_error=False, fill_value=0.0)]
@@ -546,14 +548,17 @@ class build_matrix:
         Phi = self.eigenspectra_basis()
         delta_lambda = self.lambdas[1] - self.lambdas[0]
         
-        order102 = ["A","B","D"]
+        order102 = ["A","B","C"]
         for order in order102:
             if order == "A":
                 senscount = 1
+                Phi = Phi * sens_interp[senscount](self.lambdas)[:,None]
             elif order == "B":
                 senscount = 0
-            elif order == "D":
+                Phi = Phi * sens_interp[senscount](self.lambdas)[:,None]
+            elif order == "C":
                 senscount = 2
+                Phi = Phi * sens_interp[senscount](self.lambdas)[:,None]
             print(order)
             for i in range(self.x_pixel):
                 for j in range(self.y_pixel):
@@ -599,7 +604,7 @@ class build_matrix:
                         
                         for m in range(h):
                             col = k*h+ m #correct column indexing
-                            H[row,col] += Phi[l_indx,m]*sens_idx #/ delta_lambda # instead of a trace 00111110000 we add now the function phi(lambdas) to positions of the trace
+                            H[row,col] += Phi[l_indx,m] # instead of a trace 00111110000 we add now the function phi(lambdas) to positions of the trace
                 
         return H
     

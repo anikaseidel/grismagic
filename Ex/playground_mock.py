@@ -14,8 +14,8 @@ import pandas as pd
 from scipy.linalg import pinv
 from scipy.sparse import load_npz, save_npz
 
-#H = build_matrix("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\Config Files\\GR150R.F150W.220725.conf",filter_name="F150W",wavelengthrange_file="C:\\Users\\anika\\GitHub\\grismagic\\Ex\\jwst_niriss_wavelengthrange_0002.asdf")
-#H.build_and_save_trace_matrix_coefficients_PCA_sensitivity()
+H = build_matrix("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\Config Files\\GR150R.F150W.220725.conf",filter_name="F150W",wavelengthrange_file="C:\\Users\\anika\\GitHub\\grismagic\\Ex\\jwst_niriss_wavelengthrange_0002.asdf")
+H.build_and_save_trace_matrix_coefficients_PCA_sensitivity()
 
 ######################
 # mock image. star consisting of 5 pixels centered at x,y= 50,490
@@ -114,7 +114,7 @@ plt.show()
 
 # snippet for spectrum of a specific trace
 
-one_trace = mock_dispersed[320:400, 65:70]
+one_trace = mock_dispersed[320:400, 15:17]
 sum = one_trace.sum(axis=1)
 x = np.arange(len(sum))
 
@@ -125,7 +125,7 @@ plt.ylabel("Values")
 plt.title("Spectrum of trace")
 
 plt.subplot(1,2,2)
-plt.imshow(one_trace)
+plt.imshow(mock_dispersed[320:400, 65:70],cmap="inferno", interpolation="nearest", origin="lower",aspect="auto")
 
 plt.title("One trace mock dispersion")
 
