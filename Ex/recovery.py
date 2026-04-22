@@ -5,6 +5,10 @@ from scipy.sparse.linalg import lsqr, lsmr
 import numpy as np
 from scipy.optimize import lsq_linear
 from scipy.optimize import linprog
+from scipy.linalg import pinv
+import matplotlib.pyplot as plt
+from scipy.sparse import vstack, diags, identity
+
 
 class recovery:
     def __init__(self):
@@ -23,8 +27,8 @@ class recovery:
         else:
             self.H_full = None
             
-        if os.path.exists("A_matrix_with_trace_count_sensitivities_all_orders.npz"): #checks if file exists
-            self.ASens_full = load_npz("A_matrix_with_trace_count_sensitivities_all_orders.npz") #loads stored traces matrix
+        if os.path.exists("A_F150W_20_500_matrix_with_trace_count_sensitivities_all_orders.npz"): #checks if file exists
+            self.ASens_full = load_npz("A_F150W_20_500_matrix_with_trace_count_sensitivities_all_orders.npz") #loads stored traces matrix
             self.trace_countSens = self.ASens_full[-1].toarray().ravel() #gives the amount of trace pixels per column of A. A1 gives 1D vector
             self.ASens=self.ASens_full[:-1] #keeps all rows except the last one, so A is the trace build matrix again
         else:
@@ -38,11 +42,12 @@ class recovery:
         else:
             self.H_PCA = None
         
-        if os.path.exists("H_matrix_flux_1st_order_PCA_sensitivity.npz"): #checks if file exists
-            self.H_PCA_sens = load_npz("H_matrix_flux_1st_order_PCA_sensitivity.npz") #loads stored traces matrix
+        if os.path.exists("H_matrix_F150W_flux_20_500_orders_PCA_sensitivity.npz"): #checks if file exists
+            self.H_PCA_sens = load_npz("H_matrix_F150W_flux_20_500_orders_PCA_sensitivity.npz") #loads stored traces matrix
            
         else:
             self.H_PCA_sens = None
+            
         
         
     def recover_direct_from_traces_matrix(self, dispersed):
@@ -91,7 +96,7 @@ class recovery:
         via least squares."""
         m,n = dispersed.shape
         f=dispersed.ravel() #flattens dispersion matrix to vector for matrix multiplication
-        result = lsqr(self.ASens,f) #solves min_d ||Ad-f||^2
+        result = lsqr(self.ASens,f, iter_lim=500, show=True) #solves min_d ||Ad-f||^2
         d_recovered = result[0]
         
         #d=d_recovered*self.trace_count #recovers total intensity for uniform ditribution
@@ -101,96 +106,111 @@ class recovery:
         
         return Recovered
     
-    def recover_direct_from_traces_basis_matrix_PCA(self, dispersed):
+    def recover_direct_from_traces_basis_matrix_PCA(self, dispersed, image=True):
         """Function to recover direct image from GIVEN IMAGE dispersed. Uses the precomputed traces matrix H to recover the direct image from a dispersed image 
         via least squares."""
    
         m,n=dispersed.shape
         f=dispersed.ravel() #flattens dispersion matrix to vector for matrix multiplication
-        result = lsqr(self.H_PCA_sens,f, iter_lim=500, show=True) #solves min_d ||Ad-f||^2.
+        result = lsqr(self.H_PCA_sens,f, iter_lim=100, show=True) #solves min_d ||Ad-f||^2.
         d = result[0] #  lsqr stores result as final_solution, istop, itn.... So we use only [0]
-       
+        
+        if image == False:
+            return d
+        
         A = build_matrix()
+        
         Recovered = A.integrated_flux_image_PCA(d)
      
         return Recovered
+
+
+    def recover_direct_from_traces_basis_matrix_PCA_thikonov_variance(self, dispersed, lam=1e-2):
+        """
+        Recover direct image from dispersed image using:
+
+        min_{d >= 0} ||W(Hd - f)||^2 + lambda ||d||^2
+
+        where:
+            W = diag(1/sigma)
+            sigma estimated from data (Poisson + read noise)
+        """
+        print("Variance")
+        # =====================================================
+        # 1. Flatten image
+        # =====================================================
+        print("Hi")
+        f = dispersed.astype(float).ravel()
+
+        # =====================================================
+        # 2. Estimate sigma (noise model)
+        #    sigma^2 = f + read_noise^2
+        # =====================================================
+        read_noise = 5  # reasonable default (can tune)
     
-    from scipy.optimize import lsq_linear
-from scipy.sparse import vstack, diags
-import numpy as np
+        variance = np.maximum(f,0) + read_noise**2
+        sigma = np.sqrt(variance)  
+        print("Hii")
+        sigma_inv = 1.0 / sigma  # precision vector of sqrt, so sigma^-1/2
 
-def recover_direct_from_traces_basis_matrix_PCA_thikonov_variance(self, dispersed):
-    """
-    Recover direct image from dispersed image using:
+        H_sigma = self.H_PCA_sens.multiply(sigma_inv[:,None])
+        f_sigma = sigma_inv*f
+        print("Hiii")
+        # =====================================================
+        # 4. Tikhonov regularization
+        #    augment system:
+        #    [H_w        ] d ≈ [f_w]
+        #    [√λ I       ]     [0  ]
+        # =====================================================
+        N= H_sigma.shape[1]
+        
+        H_reg = vstack([H_sigma, np.sqrt(lam)*identity(N)])
+        print("Hiiii")
+        f_reg = np.concatenate([f_sigma,np.zeros(N)])
+        print("Hiiiii")
+        # 5. Solve nonnegative least squares
+        # =====================================================
 
-    min_{d >= 0} ||W(Hd - f)||^2 + lambda ||d||^2
+        res = lsmr(H_reg, f_reg, atol=1e-15, btol=1e-15, maxiter=1000, show= True)
+        d = res[0]
 
-    where:
-        W = diag(1/sigma)
-        sigma estimated from data (Poisson + read noise)
-    """
+        # enforce nonnegativity
+        #d = np.maximum(d, 0)
 
-    # =====================================================
-    # 1. Flatten image
-    # =====================================================
-    f = dispersed.astype(float).ravel()
-    H = self.H_PCA_sens
+        print("Hiiiiii")
+        # =====================================================
+        # 6. Reconstruct image
+        # =====================================================
+        A = build_matrix()
+        Recovered = A.integrated_flux_image_PCA(d)
 
-    # =====================================================
-    # 2. Estimate sigma (noise model)
-    #    sigma^2 = f + read_noise^2
-    # =====================================================
-    read_noise = 5.0  # reasonable default (can tune)
-
-    variance = np.maximum(f, 0) + read_noise**2
-    sigma = np.sqrt(variance)
-
-    # numerical safety
-    sigma = np.maximum(sigma, 1e-8)
-
-    # =====================================================
-    # 3. Whitening (diagonal covariance)
-    # =====================================================
-    W = 1.0 / sigma
-
-    # efficient row scaling
-    H_w = H.multiply(W[:, None])   # sparse-safe row scaling
-    f_w = W * f
-
-    # =====================================================
-    # 4. Tikhonov regularization
-    #    augment system:
-    #    [H_w        ] d ≈ [f_w]
-    #    [√λ I       ]     [0  ]
-    # =====================================================
-    lam_reg = 1e-3  # tune this
-
-    n_unknowns = H.shape[1]
-
-    reg_matrix = np.sqrt(lam_reg) * diags(np.ones(n_unknowns))
-
-    H_aug = vstack([H_w, reg_matrix])
-    f_aug = np.concatenate([f_w, np.zeros(n_unknowns)])
-
-    # =====================================================
-    # 5. Solve nonnegative least squares
-    # =====================================================
-    res = lsq_linear(
-        H_aug,
-        f_aug,
-        bounds=(0, np.inf),
-        method='trf',
-        max_iter=200,
-        lsmr_tol='auto',
-        verbose=1
-    )
-
-    d = res.x
-
-    # =====================================================
-    # 6. Reconstruct image
-    # =====================================================
-    A = build_matrix()
-    Recovered = A.integrated_flux_image_PCA(d)
-
-    return Recovered
+        return Recovered
+    
+    
+    def recover_pseudoinverse(self, dispersed):
+        print("pseudoinverse")
+        pseudo_H= pinv(self.H_PCA_sens.toarray()) # moore penrose pseudoinverse
+        f=dispersed.ravel() #flattens dispersion matrix to vector for matrix multiplication
+        d = pseudo_H@f
+        A = build_matrix()
+        Recovered = A.integrated_flux_image_PCA(d)
+        return Recovered
+    
+    def recover_clip(self,dispersed):
+        print("H segments")
+        a,b = self.H_PCA_sens.shape
+        count= int(b/100)
+        d_all = np.zeros(b)
+        for i in range(count):
+            H = self.H_PCA_sens[:,i*100:(i+1)*100]
+            f=dispersed.ravel() #flattens dispersion matrix to vector for matrix multiplication
+            result = lsqr(H,f, iter_lim=100, show=False) #solves min_d ||Ad-f||^2.
+            d = result[0] #  lsqr stores result as final_solution, istop, itn.... So we use only [0]
+            d_all[i*100:(i+1)*100] = d
+            print(count-i)
+        A = build_matrix()
+        Recovered = A.integrated_flux_image_PCA(d_all)
+     
+        return Recovered
+        
+        

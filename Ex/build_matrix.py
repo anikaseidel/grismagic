@@ -6,7 +6,7 @@ import pandas as pd
 from scipy.sparse import save_npz, lil_matrix, vstack
 
 class build_matrix: 
-    def __init__(self, config = "C:\\Users\\anika\\GitHub\\grismagic\\Ex\\Config Files\\GR150R.F200W.220725.conf", filter_name="F200W",wavelengthrange_file="C:\\Users\\anika\\GitHub\\grismagic\\Ex\\jwst_niriss_wavelengthrange_0002.asdf"):
+    def __init__(self, config = "C:\\Users\\anika\\GitHub\\grismagic\\Ex\\Config Files\\GR150R.F150W.220725.conf", filter_name="F150W",wavelengthrange_file="C:\\Users\\anika\\GitHub\\grismagic\\Ex\\jwst_niriss_wavelengthrange_0002.asdf"):
         """Important: The wavelength has to be in Angstrom since the coefficients are calibrated to angstrom.
         Initialized by Config file (XRANGE, YRANGE, DFILTER, DYDX_A_0,DYDY_A_1,DLDP_A_0,DLDP_A_1)
         """
@@ -25,7 +25,7 @@ class build_matrix:
         self.orders = self.tr.orders
         
         self.xmin, self.xmax = 0, 500 # pixel range
-        self.ymin, self.ymax = 0, 500
+        self.ymin, self.ymax = 0, 20
         self.x_pixel = np.abs(self.xmin) + np.abs(self.xmax) #we need the size of the image in coding coordinates
         self.y_pixel = np.abs(self.ymin) + np.abs(self.ymax) 
         
@@ -332,34 +332,40 @@ class build_matrix:
         the trace at the object in direct coordinates. Last row includes how many trace pixels per column. Called by def build_and_save_matrix"""
 
 
-        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.1.etc.1.5.2.sens.fits") #F200W, GR150R
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F150W.1.etc.1.5.2.sens.fits") #F150W, GR150R
         data1= hdu[1].data
         wavelength1 = data1["WAVELENGTH"]
         sensitivity1 = data1["SENSITIVITY"]
-        mean1 = np.mean(sensitivity1)
-        sensitivity1=sensitivity1/mean1 #normalized
-
+        #sensitivity1[sensitivity1<1e-9]=1e-9
+        ####normalizing#################
+        ######## if still not correct 
+        #sens1_norm = np.divide(sensitivity1, sensitivity1, out=np.zeros_like(sensitivity1, dtype=float), where=sensitivity1!=0)
+        #sensitivity1=sensitivity1/mean1 #normalized
+        normalizer = np.max(sensitivity1)
+        sens1_norm = sensitivity1/normalizer
         hdu.close()
 
-        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.0.etc.1.5.2.sens.fits") #F200W, GR150R
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F150W.0.etc.1.5.2.sens.fits") #F150W, GR150R
         data0= hdu[1].data
         wavelength0 = data0["WAVELENGTH"]
         sensitivity0 = data0["SENSITIVITY"] 
-        sensitivity0 = sensitivity0/mean1 #normalized by the same factor as 1st order
-
+        #sensitivity0[sensitivity0<1e-9]=1e-9
+        #sens0_norm = np.divide(sensitivity0, sensitivity1, out=np.zeros_like(sensitivity1, dtype=float), where=sensitivity1!=0) #normalized by the same factor as 1st order
+        sens0_norm = sensitivity0/normalizer
         hdu.close()
 
-        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.2.etc.1.5.2.sens.fits") #F200W, GR150R
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F150W.2.etc.1.5.2.sens.fits") #F150W, GR150R
         data2= hdu[1].data
         wavelength2 = data2["WAVELENGTH"]
         sensitivity2 = data2["SENSITIVITY"] 
-        sensitivity2 = sensitivity2/mean1 #normalized by the same factor as 1st order
-
+        #sensitivity2[sensitivity2<1e-9]=1e-9
+        #sens2_norm = np.divide(sensitivity2, sensitivity1, out=np.zeros_like(sensitivity1, dtype=float), where=sensitivity1!=0) #normalized by the same factor as 1st order
+        sens2_norm = sensitivity2/normalizer
         hdu.close()
-        sens_interp = [interp1d(wavelength1, sensitivity1, bounds_error=False, fill_value=0.0),interp1d(wavelength0, sensitivity0, bounds_error=False, fill_value=0.0),interp1d(wavelength2, sensitivity2, bounds_error=False, fill_value=0.0)]
+        sens_interp = [interp1d(wavelength1, sens1_norm, bounds_error=False, fill_value=0.0),interp1d(wavelength0, sens0_norm, bounds_error=False, fill_value=0.0),interp1d(wavelength2, sens2_norm, bounds_error=False, fill_value=0.0)]
+        delta_lambda = self.lambdas[1]-self.lambdas[0]
 
-
-        order102 = ["A","B","C"]
+        order102 = ["A","B","D"]
                     #assembles matrix A
         N = self.x_pixel * self.y_pixel
         A=lil_matrix((N,N)) #good for sparse matrices
@@ -368,8 +374,9 @@ class build_matrix:
                 senscount = 1
             elif order == "B":
                 senscount = 0
-            elif order == "C":
+            elif order == "D":
                 senscount = 2
+            print(order)
             for i in range (self.x_pixel): #iterating over all pixels
                     for j in range (self.y_pixel): 
                                     # grismagic expects source positions in detector coords
@@ -397,7 +404,7 @@ class build_matrix:
                         
                         values = sens_interp[senscount](lam_valid).reshape(-1, 1)
                         for r, v in zip(rows, values):
-                            A[r, k] += v 
+                            A[r, k] += v #*delta_lambda
                 
             # compute row sum to mark how many trace pixels per column
         row_sum = A.sum(axis = 0)
@@ -412,7 +419,7 @@ class build_matrix:
         colored pixels each trace has. JUST DO THIS ONCE PER CONFIGURATION"""
         A = self.build_trace_matrix_sensitivities_all_orders()
         A = A.tocsr()
-        save_npz("A_matrix_with_trace_count_sensitivities_all_orders.npz", A)
+        save_npz("A_F150W_20_500_matrix_with_trace_count_sensitivities_all_orders.npz", A)
         return
     #####################################
     # Matrix with basis for one order with PCA basis
@@ -436,7 +443,7 @@ class build_matrix:
         
 
         for i in range(self.x_pixel):
-            for j in range(self.x_pixel):
+            for j in range(self.y_pixel):
                 k= i*self.y_pixel +j #gets column index right, for which pixel/column are we inserting the trace
                 
                 x0 = i + self.xmin
@@ -489,7 +496,7 @@ class build_matrix:
         return
     
     #####################################
-    # Matrix with basis for one order with PCA basis and sensitivity curves
+    # Matrix with basis for all orders with PCA basis and sensitivity curves
     ####################################
 
 
@@ -503,16 +510,16 @@ class build_matrix:
         ########
         # sensitivity curves
         
-        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.1.etc.1.5.2.sens.fits") #F200W, GR150R
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F150W.1.etc.1.5.2.sens.fits") #F150W, GR150R
         data1= hdu[1].data
         wavelength1 = data1["WAVELENGTH"]
         sensitivity1 = data1["SENSITIVITY"]
-        mean1 = np.mean(sensitivity1)
+        mean1 = np.max(sensitivity1)
         sensitivity1=sensitivity1/mean1 #normalized
 
         hdu.close()
 
-        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.0.etc.1.5.2.sens.fits") #F200W, GR150R
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F150W.0.etc.1.5.2.sens.fits") #F150W, GR150R
         data0= hdu[1].data
         wavelength0 = data0["WAVELENGTH"]
         sensitivity0 = data0["SENSITIVITY"] 
@@ -520,7 +527,7 @@ class build_matrix:
 
         hdu.close()
 
-        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F200W.2.etc.1.5.2.sens.fits") #F200W, GR150R
+        hdu = fits.open("C:\\Users\\anika\\GitHub\\grismagic\\Ex\\SenseConfig\\wfss-grism-configuration\\NIRISS.GR150R.F150W.2.etc.1.5.2.sens.fits") #F150W, GR150R
         data2= hdu[1].data
         wavelength2 = data2["WAVELENGTH"]
         sensitivity2 = data2["SENSITIVITY"] 
@@ -537,17 +544,19 @@ class build_matrix:
    
         H=lil_matrix((N,N*h)) #good for sparse matrices
         Phi = self.eigenspectra_basis()
+        delta_lambda = self.lambdas[1] - self.lambdas[0]
         
-        order102 = ["A","B","C"]
+        order102 = ["A","B","D"]
         for order in order102:
             if order == "A":
                 senscount = 1
             elif order == "B":
                 senscount = 0
-            elif order == "C":
+            elif order == "D":
                 senscount = 2
+            print(order)
             for i in range(self.x_pixel):
-                for j in range(self.x_pixel):
+                for j in range(self.y_pixel):
                     k= i*self.y_pixel +j #gets column index right, for which pixel/column are we inserting the trace
                     
                     x0 = i + self.xmin
@@ -590,7 +599,7 @@ class build_matrix:
                         
                         for m in range(h):
                             col = k*h+ m #correct column indexing
-                            H[row,col] += Phi[l_indx,m]*sens_idx # instead of a trace 00111110000 we add now the function phi(lambdas) to positions of the trace
+                            H[row,col] += Phi[l_indx,m]*sens_idx #/ delta_lambda # instead of a trace 00111110000 we add now the function phi(lambdas) to positions of the trace
                 
         return H
     
@@ -601,7 +610,7 @@ class build_matrix:
         
         H = self.build_trace_matrix_coefficients_PCA_sensitivity()
         H = H.tocsr()
-        save_npz("H_matrix_flux_500_500_orders_PCA_sensitivity.npz", H)
+        save_npz("H_matrix_F150W_flux_20_500_orders_PCA_sensitivity.npz", H)
         return
 ##################################################
 # PCA two functions to construct image from coefficients vector

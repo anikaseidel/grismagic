@@ -14,14 +14,20 @@ class dispersion:
             self.A = None
             self.trace_count = None
         
-        if os.path.exists("A_matrix_with_trace_count_sensitivities_all_orders.npz"): #checks if file exists
-            self.ASens_full = load_npz("A_matrix_with_trace_count_sensitivities_all_orders.npz") #loads stored traces matrix
+        if os.path.exists("A_F150W_20_500_matrix_with_trace_count_sensitivities_all_orders.npz"): #checks if file exists
+            self.ASens_full = load_npz("A_F150W_20_500_matrix_with_trace_count_sensitivities_all_orders.npz") #loads stored traces matrix
             self.trace_countSens = self.ASens_full[-1].toarray().ravel() #gives the amount of trace pixels per column of A. A1 gives 1D vector
             self.ASens=self.ASens_full[:-1] #keeps all rows except the last one, so A is the trace build matrix again
         else:
             self.ASens_full = None
             self.ASens = None
             self.trace_countSens = None
+            
+        if os.path.exists("H_matrix_F150W_flux_20_500_orders_PCA_sensitivity.npz"): #checks if file exists
+            self.H_PCA_sens = load_npz("H_matrix_F150W_flux_20_500_orders_PCA_sensitivity.npz") #loads stored traces matrix
+           
+        else:
+            self.H_PCA_sens = None
 
         
     def compute_dispersed_linear(self, direct_image):
@@ -68,4 +74,9 @@ class dispersion:
         
         f = np.array(f_sparse.todense()).ravel()
         dispersed = f.reshape(m, n) #reconstructs matrix from solution
+        return dispersed
+    
+    def dispersed_PCA(self,a_tilde):
+        f = self.H_PCA_sens@a_tilde
+        dispersed = f.reshape(500,20)
         return dispersed
